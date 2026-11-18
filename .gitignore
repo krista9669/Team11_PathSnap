@@ -83,12 +83,4 @@ outputs/model_results/*.joblib
 # ==========================================
 # Large generated HMM transition matrices
 # ==========================================
-outputs/hmm_results/*_transitions.csv__pycache__/
-*.py[cod]
-.venv/
-venv/
-.env
-.env.*
-!.env.example
-.pytest_cache/
-.streamlit/secrets.toml
+outputs/hmm_results/*_transitions.csv
