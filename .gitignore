@@ -79,3 +79,11 @@ outputs/model_results/*.joblib
 # ==========================================
 *.tmp
 *.bak
+
+# ==========================================
+# Large generated HMM transition matrices
+# ==========================================
+outputs/hmm_results/*_transitions.csv
+# Python cache files
+__pycache__/
+*.py[cod]

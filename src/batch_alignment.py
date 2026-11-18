@@ -17,9 +17,9 @@ PROCESSED_DIR = ROOT / "data" / "processed"
 EARTH_RADIUS_M = 6_371_000
 
 
-def load_trip(trip_id):
+def load_trip(trip_id, data_dir=TRAIN_DIR):
 
-    folder = TRAIN_DIR / trip_id
+    folder = Path(data_dir) / str(trip_id)
 
     track = pd.read_csv(
         folder / f"{trip_id}.track",
@@ -165,9 +165,12 @@ def monotonic_alignment(distances):
     return positions
 
 
-def process_trip(trip_id):
+def process_trip(trip_id, data_dir=TRAIN_DIR):
 
-    track, nodes, arcs, route = load_trip(trip_id)
+    track, nodes, arcs, route = load_trip(
+        trip_id,
+        data_dir=data_dir,
+    )
 
     distances, route_ids = calculate_distances(
         track, nodes, arcs, route

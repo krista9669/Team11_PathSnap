@@ -378,6 +378,11 @@ Team11_PathSnap/
 | `validate_alignment.py` | Validates route-alignment results |
 | `inspect_midpoint_ranks.py` | Investigates candidate ranking and midpoint-based retrieval |
 | `inspect_missing_candidates.py` | Investigates missing candidate road segments |
+| `src/hmm/emission_probabilities.py` | Scores road candidates and normalizes per-observation RF emissions |
+| `src/hmm/transition_probabilities.py` | Builds road-network transition scores and matrices |
+| `src/hmm/viterbi.py` | Reconstructs one road-arc sequence per GPS trip |
+| `src/hmm/evaluate_viterbi.py` | Compares Viterbi and classifier-only predictions |
+| `src/hmm/run_pipeline.py` | Runs and summarizes a bounded HMM pilot batch |
 
 ### 9.2 Directory Description
 
@@ -403,6 +408,46 @@ Stores machine learning model evaluation results, performance comparisons, confu
 **`outputs/`**
 
 Contains generated visualizations, including interactive Folium maps of GPS trajectories.
+
+### 9.3 HMM Route Reconstruction
+
+The HMM pipeline turns Random Forest candidate probabilities into per-observation
+emissions, builds road-network transition probabilities, and uses Viterbi
+decoding to select one road arc per GPS observation. The evaluation compares
+those predictions with Random Forest Top-1 and reports per-trip and pooled
+arc-level metrics, selected-transition reachability, GPS-to-road distance,
+runtime and output size.
+
+Run the staged pilot from the repository root:
+
+```powershell
+python -m src.hmm.run_pipeline
+```
+
+By default, this processes only Trips 5, 13 and 16. A different explicit
+subset can be supplied with `--trip-ids`, for example
+`python -m src.hmm.run_pipeline --trip-ids 5 13 16`. It does not start the
+remaining validation trips.
+Outputs are written under `outputs/hmm_results/`, with per-trip evaluation
+files and a `pilot_batch_summary.csv` under `outputs/hmm_results/evaluation/`.
+
+The designated ten-trip student-test partition can be evaluated separately
+with the already-trained model:
+
+```powershell
+python -m src.hmm.run_pipeline --partition student_test
+```
+
+This prepares that partition's candidate features and route alignments from
+`Student folder/student_test/` and writes its aggregate summary to
+`outputs/hmm_results/evaluation/student_test_hmm_summary.csv`. It does not
+retrain the classifier or access the evaluator-testing partition.
+
+The monotonic-alignment arc labels used for evaluation are provisional,
+route-derived references rather than independently verified ground truth.
+Results should be described with this limitation; the student-test partition
+should be used only as specified by project guidelines, and the
+evaluator-testing partition must not be used for parameter selection.
 
 ## 10. Installation and Execution
 
@@ -484,6 +529,19 @@ Candidate generation, feature extraction and alignment can also be executed indi
 
 Validation and diagnostic scripts can be run separately to inspect candidate coverage, alignment quality and intermediate processing results.
 
+Run the staged HMM pilot after the Random Forest model and trip-level
+alignment/feature files are available:
+
+```powershell
+python -m src.hmm.run_pipeline
+```
+
+To run the separate ten-trip student-test evaluation, use:
+
+```powershell
+python -m src.hmm.run_pipeline --partition student_test
+```
+
 ## 11. Future Improvements
 
 Potential directions for further development include:
@@ -491,8 +549,7 @@ Potential directions for further development include:
 - Improving candidate-generation coverage and spatial-search efficiency.
 - Performing trip-level cross-validation.
 - Investigating feature importance and hyperparameter optimization.
-- Exploring Hidden Markov Models (HMM) and Viterbi decoding.
-- Improving sequence-level route continuity.
+- Improving HMM transition modelling and sequence-level route continuity.
 - Evaluating reconstruction quality on independently held-out trips.
 - Exploring cloud-based execution using Modal.
 - Comparing observation-level predictions with complete reconstructed routes.

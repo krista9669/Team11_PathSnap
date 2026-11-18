@@ -36,9 +36,9 @@ EARTH_RADIUS_M = 6_371_000
 # 2. LOAD TRIP DATA
 # ============================================================
 
-def load_trip(trip_id):
+def load_trip(trip_id, data_dir=TRAIN_DIR):
 
-    trip_dir = TRAIN_DIR / trip_id
+    trip_dir = Path(data_dir) / str(trip_id)
 
     track = pd.read_csv(
         trip_dir / f"{trip_id}.track",
@@ -307,11 +307,11 @@ def generate_candidates_for_point(
 # 8. GENERATE CANDIDATES FOR A COMPLETE TRIP
 # ============================================================
 
-def generate_trip_candidates(trip_id):
+def generate_trip_candidates(trip_id, data_dir=TRAIN_DIR):
 
     print("\nLoading trip:", trip_id)
 
-    track, nodes, arcs = load_trip(trip_id)
+    track, nodes, arcs = load_trip(trip_id, data_dir=data_dir)
 
     print("GPS observations:", len(track))
     print("Road nodes:", len(nodes))

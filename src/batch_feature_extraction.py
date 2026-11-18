@@ -2,14 +2,22 @@
 from pathlib import Path
 import pandas as pd
 
-from candidate_generation import (
-    load_trip,
-    prepare_road_arcs,
-    build_segment_spatial_index,
-    generate_candidates_for_point,
-)
-
-from feature_extraction import extract_features
+if __package__:
+    from .candidate_generation import (
+        load_trip,
+        prepare_road_arcs,
+        build_segment_spatial_index,
+        generate_candidates_for_point,
+    )
+    from .feature_extraction import extract_features
+else:
+    from candidate_generation import (
+        load_trip,
+        prepare_road_arcs,
+        build_segment_spatial_index,
+        generate_candidates_for_point,
+    )
+    from feature_extraction import extract_features
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
