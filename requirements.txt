@@ -8,3 +8,4 @@ networkx
 folium
 lightgbm
 joblib
+optuna==5.1.0

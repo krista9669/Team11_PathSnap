@@ -1,0 +1,2 @@
+model,cv_macro_f1_mean,student_top1_accuracy,student_macro_f1,student_log_loss,inference_time_seconds,candidate_recall
+Tuned Random Forest,0.8425999655720612,0.8104960835509138,0.8713968450463827,0.08375109281264886,3.1916099000081886,0.9994780793319415
