@@ -1,11 +1,726 @@
 # PathSnap
-## Machine Learning-Based GPS Map Matching
+### Machine-Learning GPS Map Matching with HMM-Based Route Reconstruction
 
-PathSnap is a machine learning-based map-matching system designed to identify the most likely road segments corresponding to noisy GPS observations. The project combines spatial candidate generation, feature engineering, feature selection and multiple machine learning models to reconstruct vehicle trajectories over a road network.
+PathSnap is a GPS trajectory map-matching system that assigns noisy GPS observations to directed road-network segments. It combines spatial candidate generation, feature engineering, supervised machine learning and Hidden Markov Model (HMM) sequence decoding to reconstruct geographically consistent routes.
+
+The system uses five candidate-scoring models:
+- Logistic Regression
+- Random Forest
+- Multi-Layer Perceptron (MLP)
+- LightGBM
+- Gaussian Naive Bayes
+
+Random Forest is used as the candidate-scoring model for the HMM/Viterbi route reconstruction pipeline.
 
 ---
 
-## Team Members
+## Contents
+
+1. [Project Overview](#project-overview)
+2. [Dataset](#dataset)
+3. [System Architecture](#system-architecture)
+4. [Methodology](#methodology)
+5. [Machine Learning Models](#machine-learning-models)
+6. [Model Evaluation](#model-evaluation)
+7. [HMM and Viterbi Route Reconstruction](#hmm-and-viterbi-route-reconstruction)
+8. [Bayesian Hyperparameter Optimisation](#bayesian-hyperparameter-optimisation)
+9. [Repository Structure](#repository-structure)
+10. [Installation](#installation)
+11. [Running the Pipeline](#running-the-pipeline)
+12. [HMM Evaluation](#hmm-evaluation)
+13. [Web Application](#web-application)
+14. [Known Limitations](#known-limitations)
+15. [Future Improvements](#future-improvements)
+16. [Team](#team)
+
+---
+
+## 1. Project Overview
+
+GPS devices produce noisy location observations due to measurement errors, signal interference and environmental conditions. These observations do not necessarily lie directly on the roads travelled by a vehicle.
+
+Map matching addresses this problem by identifying the most likely road segments corresponding to a sequence of GPS observations.
+
+PathSnap approaches map matching as a two-stage process.
+
+**Stage 1: Candidate Generation and Classification**
+
+For every GPS observation:
+- Retrieve nearby directed road segments.
+- Extract spatial, geometric and movement-related features.
+- Score candidate road segments using supervised machine-learning classifiers.
+- Select the most likely candidate using the trained model.
+
+**Stage 2: Sequential Route Reconstruction**
+
+- Convert Random Forest probabilities into HMM emission scores.
+- Construct transition scores using the directed road network.
+- Apply the Viterbi algorithm to identify the most likely sequence of road segments.
+
+The objective is to improve route consistency by considering both individual GPS observations and the connectivity of consecutive road segments.
+
+---
+
+## 2. Dataset
+
+The dataset consists of individual trips represented through four files.
+
+| File | Description |
+|---|---|
+| `.track` | GPS observations containing longitude, latitude and timestamps |
+| `.nodes` | Road-network node coordinates |
+| `.arcs` | Directed connections between road-network nodes |
+| `.route` | Chronological sequence of reference road-arc IDs |
+
+### Dataset partitions
+
+| Partition | Number of trips | Purpose |
+|---|---:|---|
+| Training | 80 | Model development, feature engineering and validation |
+| Student Test | 10 | Held-out development-stage evaluation |
+| Evaluator Test | 10 | Reserved final evaluation |
+
+The training and student-test partitions are used for the documented development experiments.
+
+The evaluator partition must remain isolated from model development, parameter tuning and student-side prediction logic. Its reference labels must not be exposed through the public repository or frontend.
+
+---
+
+## 3. System Architecture
+
+The PathSnap pipeline consists of the following components:
+
+1. Data loading and validation
+2. Candidate generation
+3. Feature extraction
+4. Route alignment and label generation
+5. Model training and comparison
+6. Random Forest probability generation
+7. HMM emission and transition construction
+8. Viterbi sequence decoding
+9. Route evaluation and geographical visualisation
+
+### Processing workflow
+
+```mermaid
+flowchart TD
+    A[GPS Track and Road Network] --> B[Data Validation]
+    B --> C[Candidate Generation]
+    C --> D[Feature Extraction]
+    A --> E[Reference Route Alignment]
+    D --> F[Five ML Classifiers]
+    E --> F
+    F --> G[Random Forest Probabilities]
+    G --> H[HMM Emissions]
+    C --> I[Road Network Transitions]
+    H --> J[Viterbi Decoding]
+    I --> J
+    J --> K[Predicted Road Arc Sequence]
+    K --> L[Evaluation and Visualisation]
+```
+
+---
+
+## 4. Methodology
+
+### 4.1 Candidate Generation
+
+Candidate generation identifies road segments that may correspond to each GPS observation.
+
+The implementation uses:
+
+- Road-arc sampling at approximately 30-metre intervals.
+- Unit-sphere XYZ coordinate representation.
+- SciPy `cKDTree` for spatial indexing.
+- Progressive search radii of 100 m, 250 m, 500 m and 1,000 m.
+- Exact point-to-segment distance refinement.
+- Top-20 candidate road arcs per GPS observation.
+
+Candidate coverage is important because a classifier cannot select the correct road segment if that segment is absent from the candidate set.
+
+**Recorded candidate-generation results:**
+
+| Metric | Result |
+|---|---:|
+| Training GPS observations | 208,417 |
+| Observations with candidates | 196,176 |
+| Uncovered observations | 12,241 |
+| Training Top-20 coverage | 94.13% |
+| Average training trip coverage | 98.39% |
+| Trip 33 coverage | 37.13% |
+| Trip 54 coverage | 60.83% |
+| Student-test candidate recall | 99.95% |
+
+The training coverage and student-test candidate recall refer to different partitions and should not be interpreted as the same metric.
+
+### 4.2 Feature Engineering
+
+Candidate road segments are represented using spatial, movement-related and geometric features.
+
+The feature representation contains 11 model inputs.
+
+| Feature group | Features |
+|---|---|
+| GPS-to-segment geometry | `distance_m`, `projection_fraction`, `heading_difference` |
+| GPS movement | `gps_speed_mps`, `gps_displacement_m`, `time_gap_s` |
+| Segment properties | `segment_length_m` |
+| Circular bearing encodings | `gps_bearing_sin`, `gps_bearing_cos`, `segment_bearing_sin`, `segment_bearing_cos` |
+
+Circular encoding represents angular information using sine and cosine values, avoiding the discontinuity between bearings close to 0° and 360°.
+
+### 4.3 Feature Selection
+
+Feature selection combines:
+
+- Variance threshold analysis.
+- Spearman correlation analysis.
+- Variance Inflation Factor (VIF) analysis.
+
+The recorded feature-selection analysis reports that retained features have VIF values below 3.7.
+
+Generated feature-selection outputs are stored in:
+
+```text
+outputs/feature_selection/
+```
+
+### 4.4 Route Alignment and Label Generation
+
+The reference route is aligned with the GPS trajectory using monotonic route alignment.
+
+The alignment maintains non-decreasing route progress along the trajectory.
+
+Candidate road arcs matching the aligned reference arc are assigned positive labels, while other candidates are assigned negative labels.
+
+These labels are used for supervised model training and evaluation.
+
+The reference labels are route-derived and should be interpreted as provisional evaluation labels rather than independently verified ground truth.
+
+---
+
+## 5. Machine Learning Models
+
+Five classifiers were implemented and compared.
+
+| Model | Description |
+|---|---|
+| Logistic Regression | Linear probabilistic classification baseline |
+| Random Forest | Ensemble of decision trees |
+| MLP | Neural network with multiple fully connected layers |
+| LightGBM | Gradient-boosted decision tree model |
+| Gaussian Naive Bayes | Probabilistic classifier based on Gaussian feature distributions |
+
+### Random Forest configuration
+
+The recorded Random Forest pipeline uses:
+
+- Median imputation for missing feature values.
+- 300 decision trees.
+- `min_samples_split = 4`.
+- `min_samples_leaf = 2`.
+- `class_weight = balanced`.
+- `n_jobs = -1`.
+- `random_state = 42`.
+
+The saved model is expected at:
+
+```text
+outputs/model_results/saved_models/random_forest.joblib
+```
+
+The model is used as the candidate-scoring component for the HMM pipeline.
+
+---
+
+## 6. Model Evaluation
+
+The five models were evaluated using a trip-grouped 25% hold-out split with `GroupShuffleSplit` and `random_state=42`.
+
+Grouping by trip helps prevent observations from the same trip appearing in both training and validation subsets.
+
+### Recorded validation results
+
+| Model | Candidate Accuracy | Precision | Recall | Binary F1 | Candidate Macro F1 | Log Loss | Observation Top-1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Random Forest | 0.97156 | 0.72902 | 0.69082 | 0.70941 | 0.84723 | 0.09889 | 0.73031 |
+| MLP | 0.97075 | 0.74214 | 0.64030 | 0.68747 | 0.83606 | 0.08434 | 0.72137 |
+| LightGBM | 0.94793 | 0.48993 | 0.88034 | 0.62952 | 0.80076 | 0.13619 | 0.72608 |
+| Logistic Regression | 0.78388 | 0.17755 | 0.90881 | 0.29707 | 0.58469 | 0.40659 | 0.51636 |
+| Gaussian Naive Bayes | 0.94802 | 0.43992 | 0.12581 | 0.19567 | 0.58440 | 0.17928 | 0.61153 |
+
+### Observations
+
+- Random Forest achieved the highest candidate Macro F1 and observation-level Top-1 accuracy.
+- MLP achieved the lowest candidate log loss.
+- LightGBM achieved the highest candidate recall.
+- Logistic Regression provided a comparatively simple baseline.
+- Gaussian Naive Bayes achieved high candidate accuracy but substantially lower recall.
+
+Candidate-level classification metrics and observation-level Top-1 accuracy measure different aspects of the pipeline and should be interpreted separately.
+
+---
+
+## 7. HMM and Viterbi Route Reconstruction
+
+The HMM stage improves route reconstruction by considering transitions between consecutive road-segment candidates.
+
+### 7.1 Emission Probabilities
+
+Random Forest candidate probabilities are used to construct emission scores.
+
+The scores are normalised within each GPS observation.
+
+These are classifier-derived scores and should not be interpreted as independently calibrated generative likelihoods.
+
+Implementation:
+
+```text
+src/hmm/emission_probabilities.py
+```
+
+### 7.2 Transition Probabilities
+
+Transition scores represent the likelihood of moving from one candidate road arc to another.
+
+The implementation considers:
+
+- Directed road-network connectivity.
+- Haversine road-arc lengths.
+- Bounded shortest-path search.
+- Projected positions along road segments.
+- Observed GPS displacement.
+- Reverse-direction penalties.
+- Implied vehicle speed.
+
+Recorded transition parameters include:
+
+| Parameter | Value |
+|---|---:|
+| Middle-path search cutoff | 1,000 m |
+| Unreachable transition score | 1e-8 |
+| Reverse same-arc penalty | 0.05 |
+| Implied-speed threshold | 70 m/s |
+| Penalty above speed threshold | 0.001 |
+
+Transition scores are normalised where applicable.
+
+Implementation:
+
+```text
+src/hmm/transition_probabilities.py
+```
+
+### 7.3 Viterbi Decoding
+
+The Viterbi algorithm identifies the most likely sequence of hidden states using dynamic programming.
+
+The implementation uses:
+
+- Log-space probability calculations.
+- Dynamic programming.
+- Backtracking.
+- One selected road arc per GPS observation.
+
+Implementation:
+
+```text
+src/hmm/viterbi.py
+```
+
+### 7.4 Student-Test Evaluation
+
+The RF and RF + HMM/Viterbi pipelines were evaluated on ten student-test trips containing 19,160 GPS observations.
+
+| Metric | RF Top-1 | RF + HMM/Viterbi |
+|---|---:|---:|
+| Accuracy | 0.80433 | 0.86660 |
+| Macro Precision | 0.68542 | 0.84707 |
+| Macro Recall | 0.62442 | 0.81995 |
+| Macro F1 | 0.64124 | 0.82511 |
+| Weighted F1 | 0.85249 | 0.88888 |
+| Mean selected GPS-to-road distance | 6.423 m | 6.579 m |
+| Median selected GPS-to-road distance | 5.148 m | 5.287 m |
+
+Additional recorded results:
+
+- Total observations: 19,160.
+- Predictions changed by HMM: 3,208.
+- RF-wrong to HMM-correct: 1,892.
+- RF-correct to HMM-wrong: 699.
+- Both correct: 14,712.
+- Both wrong: 1,857.
+- Selected-transition reachability: 99.979%.
+
+HMM/Viterbi improved pooled accuracy and Macro F1. However, the mean and median selected GPS-to-road distances increased slightly. Therefore, improvements in label agreement do not necessarily imply improvements in every geometric metric.
+
+---
+
+## 8. Bayesian Hyperparameter Optimisation
+
+Bayesian hyperparameter optimisation was explored for Random Forest using Optuna's Tree-structured Parzen Estimator (TPE) sampler.
+
+The objective was to maximise trip-grouped cross-validation Macro F1.
+
+### Recorded optimisation setup
+
+- Model: Random Forest.
+- Optimisation framework: Optuna.
+- Sampler: TPE.
+- Planned trials: 30.
+- Completed pilot trials: 3.
+- Representative training trips: 6.
+- Grouped folds: 3.
+
+The experiment was a time-limited pilot rather than a completed 30-trial search.
+
+### Pilot comparison
+
+| Metric | Untuned RF (300 trees) | Tuned RF (100 trees) |
+|---|---:|---:|
+| CV Macro F1 | 0.8295 | 0.8426 |
+| Student-test Top-1 | 0.8121 | 0.8105 |
+| Student-test Macro F1 | 0.8786 | 0.8714 |
+| Inference time | 9.37 s | 3.19 s |
+
+### Interpretation
+
+The tuned model improved the recorded cross-validation Macro F1 and reduced inference time by approximately two-thirds.
+
+However, student-test Top-1 and Macro F1 were slightly lower than the untuned model.
+
+The pilot therefore does not establish that hyperparameter tuning improves the final full-data model. The untuned 300-tree Random Forest remains the official baseline.
+
+The tuning objective did not use student-test data, and the evaluator partition was not accessed.
+
+Notebook:
+
+```text
+notebooks/04_bayesian_hyperparameter_optimization.ipynb
+```
+
+Detailed report:
+
+```text
+reports/section_4_bayesian_optimization.md
+```
+
+---
+
+## 9. Repository Structure
+
+```text
+Team11_PathSnap/
+│
+├── backend/
+│   ├── main.py
+│   └── requirements.txt
+│
+├── frontend/
+│   └── app.py
+│
+├── data/
+│   └── processed/
+│
+├── src/
+│   ├── data_processing.py
+│   ├── candidate_generation.py
+│   ├── feature_extraction.py
+│   ├── feature_selection.py
+│   ├── ground_truth_alignment.py
+│   ├── monotonic_alignment.py
+│   ├── batch_feature_extraction.py
+│   ├── batch_alignment.py
+│   ├── train_models.py
+│   ├── validate_alignment.py
+│   ├── validate_candidates.py
+│   ├── diagnose_candidate_coverage.py
+│   └── hmm/
+│       ├── emission_probabilities.py
+│       ├── transition_probabilities.py
+│       ├── viterbi.py
+│       ├── evaluate_viterbi.py
+│       └── run_pipeline.py
+│
+├── notebooks/
+│   └── 04_bayesian_hyperparameter_optimization.ipynb
+│
+├── outputs/
+│   ├── feature_selection/
+│   ├── model_results/
+│   ├── hyperparameter_optimization/
+│   └── hmm_results/
+│
+├── reports/
+│   └── section_4_bayesian_optimization.md
+│
+├── tests/
+│   └── test_hmm_pipeline.py
+│
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
+
+Generated outputs, locally saved model artifacts and datasets may not all be tracked in Git. Consult the relevant scripts and `.gitignore` when reproducing the experiments.
+
+**Important:** Do not commit the evaluator dataset or its reference routes to the public repository.
+
+---
+
+## 10. Installation
+
+### Prerequisites
+
+- Python 3.
+- Git.
+- pip.
+- Access to the authorised training and student-test dataset.
+
+### Clone the repository
+
+```bash
+git clone https://github.com/krista9669/Team11_PathSnap.git
+
+cd Team11_PathSnap
+```
+
+### Create a virtual environment
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+
+.venv\Scripts\Activate.ps1
+```
+
+Linux/macOS:
+
+```bash
+python -m venv .venv
+
+source .venv/bin/activate
+```
+
+### Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Install additional packages required by the web application and tests if they are not already included:
+
+```bash
+pip install fastapi "uvicorn[standard]" streamlit streamlit-folium requests pytest
+```
+
+### Configure the dataset path
+
+The pipeline currently uses local dataset path constants in several source files.
+
+Configure the appropriate dataset root before running scripts that load raw data.
+
+Relevant modules include:
+
+```text
+src/data_processing.py
+src/candidate_generation.py
+src/feature_extraction.py
+src/batch_feature_extraction.py
+src/batch_alignment.py
+src/monotonic_alignment.py
+src/ground_truth_alignment.py
+src/validate_candidates.py
+src/hmm/run_pipeline.py
+```
+
+The expected local directory layout is:
+
+```text
+DATA_ROOT/
+├── train/
+└── student_test/
+```
+
+Do not point student-side development scripts at the evaluator partition.
+
+---
+
+## 11. Running the Pipeline
+
+Run commands from the repository root.
+
+### Step 1: Data validation
+
+```bash
+python src/data_processing.py
+```
+
+### Step 2: Candidate generation and feature extraction
+
+```bash
+python src/batch_feature_extraction.py
+```
+
+### Step 3: Feature selection
+
+```bash
+python src/feature_selection.py
+```
+
+### Step 4: Route alignment
+
+```bash
+python src/batch_alignment.py
+```
+
+### Step 5: Train and compare the five models
+
+```bash
+python src/train_models.py
+```
+
+The training stage saves model comparison outputs and the Random Forest model.
+
+Expected model path:
+
+```text
+outputs/model_results/saved_models/random_forest.joblib
+```
+
+Training can take considerable time depending on the machine and dataset size.
+
+---
+
+## 12. HMM Evaluation
+
+The HMM pipeline requires the trained Random Forest model.
+
+Run the HMM pipeline using module execution from the repository root:
+
+```bash
+python -m src.hmm.run_pipeline
+```
+
+Run on selected training trips:
+
+```bash
+python -m src.hmm.run_pipeline --trip-ids 5 13 16
+```
+
+Run on the student-test partition:
+
+```bash
+python -m src.hmm.run_pipeline --partition student_test
+```
+
+The student-test run uses the already-trained model and does not retrain the classifier.
+
+Generated HMM outputs are stored in:
+
+```text
+outputs/hmm_results/
+```
+
+Evaluation summaries are stored under:
+
+```text
+outputs/hmm_results/evaluation/
+```
+
+---
+
+## 13. Tests
+
+Run the available test suite:
+
+```bash
+python -m pytest tests -v
+```
+
+The recorded HMM unit tests cover:
+
+1. Emission probability normalisation.
+2. Transition matrix dimensions and unreachable-transition penalties.
+3. Viterbi prediction length.
+4. Rejection of invalid transition probabilities.
+
+These tests verify selected HMM components; they do not constitute complete end-to-end API or frontend integration testing.
+
+---
+
+## 14. Web Application
+
+PathSnap includes:
+
+- FastAPI backend.
+- Streamlit frontend.
+- Folium geographical visualisation.
+
+### Start the backend
+
+```bash
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+API documentation:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+### Start the frontend
+
+In a separate terminal:
+
+```bash
+streamlit run frontend/app.py
+```
+
+The current application provides trip selection, GPS trajectory visualisation, road-network geometry and reference-route layers.
+
+### Current integration status
+
+The current repository version documents the `/predict` endpoint as a placeholder.
+
+The trained Random Forest and HMM/Viterbi pipeline have not yet been fully connected to the API prediction endpoint.
+
+The frontend also requires API URL configuration for a two-laptop demonstration.
+
+Therefore, the existing application should be treated as a geographical visualisation and API prototype, not as a completed end-to-end prediction deployment.
+
+---
+
+## 15. Known Limitations
+
+- **Provisional reference labels:** Labels are derived from route alignment and are not independently verified ground truth.
+- **Candidate coverage:** Some training trips have substantially lower candidate coverage than the overall average.
+- **HMM trade-offs:** Sequential decoding improves pooled student-test accuracy and Macro F1, but can change previously correct predictions and does not improve every geometric metric.
+- **Bayesian optimisation:** Only 3 of 30 planned trials were completed in the recorded pilot.
+- **Model deployment:** The trained Random Forest and HMM/Viterbi components are not yet fully integrated into `/predict`.
+- **Configuration:** Several dataset paths and the frontend API URL require local configuration.
+- **Dependencies:** The root and backend dependency files should be consolidated and verified using a clean installation.
+- **Evaluation discipline:** The evaluator partition must remain isolated from development and tuning.
+
+---
+
+## 16. Future Improvements
+
+1. Complete Random Forest and HMM/Viterbi integration with the FastAPI prediction endpoint.
+2. Configure the backend and frontend for communication across two laptops.
+3. Move dataset paths and service URLs into environment-based configuration.
+4. Complete the full Bayesian optimisation experiment.
+5. Improve candidate coverage for difficult training trajectories.
+6. Expand automated tests to cover the complete inference pipeline.
+7. Improve HMM transition modelling for disconnected or difficult road-network segments.
+8. Capture genuine application and API demonstration evidence.
+9. Improve documentation and reproducibility of the complete pipeline.
+
+---
+
+## Team
+
+**Team 11**
 
 | Sl. No. | University ID |
 |:---:|---|
@@ -13,556 +728,3 @@ PathSnap is a machine learning-based map-matching system designed to identify th
 | 2 | PES2UG24CS232 |
 | 3 | PES2UG24CS233 |
 | 4 | PES2UG24CS234 |
-
----
-
-## 1. Problem Statement
-
-GPS trajectories frequently contain positional inaccuracies caused by signal interference, measurement noise and urban environments. As a result, recorded GPS coordinates may not lie exactly on the roads travelled by a vehicle.
-
-Map matching addresses this problem by associating GPS observations with the most likely road segments in a given road network.
-
-PathSnap investigates machine learning approaches to identify the most probable road segment for each GPS observation and reconstruct the corresponding vehicle trajectory.
-
-## 2. Project Objectives
-
-- Preprocess and validate GPS trajectory and road-network data.
-- Generate plausible road-segment candidates for each GPS observation.
-- Extract meaningful spatial and movement-related features.
-- Perform feature selection to identify informative features and reduce redundancy.
-- Train and compare five different machine learning models.
-- Evaluate model performance using classification and candidate-ranking metrics.
-- Investigate route alignment and continuity for sequence-level map matching.
-
-## 3. Dataset Description
-
-The dataset consists of GPS trajectories and corresponding road-network information.
-
-Each trip contains four files:
-
-| File | Description |
-|---|---|
-| `.track` | GPS longitude, latitude and timestamp observations |
-| `.nodes` | Geographic coordinates of road-network nodes |
-| `.arcs` | Connections between road-network nodes |
-| `.route` | Reference sequence of road-segment IDs |
-
-### Dataset Partitions
-
-| Partition | Number of Trips | Purpose |
-|---|---:|---|
-| Training | 80 | Model development and training |
-| Student Testing | 10 | Development and comparison |
-| Evaluator | Reserved | Not used during development |
-
-The raw dataset is maintained separately from the source repository.
-
-## 4. Methodology
-
-The PathSnap pipeline consists of data preprocessing, candidate generation, feature extraction, feature selection, route alignment, model training and evaluation.
-
-### 4.1 Data Preprocessing
-
-The preprocessing stage prepares raw GPS and road-network data for subsequent analysis.
-
-The operations include:
-
-- Loading and validating trip files.
-- Checking missing and invalid values.
-- Identifying duplicate GPS observations.
-- Validating timestamps and time intervals.
-- Analysing temporal gaps in GPS trajectories.
-- Checking road-network connectivity.
-- Calculating graph statistics.
-- Visualizing GPS trajectories and road networks using Folium.
-
-The preprocessing stage helps identify data quality issues before candidate generation and feature extraction.
-
-### 4.2 Candidate Generation
-
-Candidate generation identifies nearby road segments that could potentially correspond to each GPS observation.
-
-The implemented approach uses spatial indexing and geometric distance calculations.
-
-The process involves:
-
-1. Sampling points along road segments at approximately 30-metre intervals.
-2. Converting geographic coordinates into unit-sphere XYZ coordinates.
-3. Constructing a spatial index using SciPy's `cKDTree`.
-4. Performing progressive spatial-radius searches.
-5. Identifying unique candidate road-segment IDs.
-6. Refining candidate distances using point-to-segment distance calculations.
-7. Ranking candidates and retaining the Top-20 road segments.
-
-This reduces the search space before machine learning is applied.
-
-Candidate coverage is an important consideration because a model cannot select the correct road segment if it is absent from the generated candidate set.
-
-### 4.3 Feature Engineering
-
-Feature extraction describes the spatial and movement-related relationship between GPS observations and candidate road segments.
-
-The engineered features include:
-
-| Feature | Description |
-|---|---|
-| `distance_m` | Distance between GPS observation and candidate road segment |
-| `gps_speed_mps` | Estimated GPS movement speed |
-| `gps_displacement_m` | Distance between consecutive GPS observations |
-| `time_gap_s` | Time difference between consecutive observations |
-| `gps_bearing` | Direction of GPS movement |
-| `segment_length_m` | Length of candidate road segment |
-| `segment_bearing` | Direction of candidate road segment |
-| `heading_difference` | Difference between GPS and road-segment directions |
-| `projection_distance_m` | Distance associated with projection onto the segment |
-| `projection_fraction` | Relative position of the projected point along the segment |
-
-Circular direction features can additionally be represented using sine and cosine transformations.
-
-These features provide information about the spatial proximity, direction and movement characteristics of possible road-segment matches.
-
-### 4.4 Feature Selection
-
-Feature selection identifies informative features while reducing redundancy and multicollinearity.
-
-The analysis includes:
-
-- Variance threshold analysis.
-- Correlation analysis.
-- Spearman correlation heatmaps.
-- High-correlation pair identification.
-- Variance Inflation Factor (VIF) analysis.
-- Domain-based feature selection.
-
-The selected features are used to support subsequent model development.
-
-### 4.5 Route Alignment and Label Generation
-
-Reference route information is used to derive provisional candidate labels through route alignment.
-
-Monotonic alignment associates GPS observations with positions along the reference route while maintaining non-decreasing route progression.
-
-Candidate labels are generated in memory by comparing candidate arc IDs with aligned route arc IDs.
-
-These labels support supervised model training and evaluation.
-
-The alignment-derived labels are provisional and should not be interpreted as independently verified real-world predictions.
-
-## 5. Machine Learning Models
-
-Five classification models are implemented and evaluated.
-
-| Model | Learning Approach | Main Characteristics |
-|---|---|---|
-| Logistic Regression | Linear probabilistic classification | Interpretable baseline model |
-| Gaussian Naive Bayes | Bayesian probabilistic classification | Uses conditional independence assumptions |
-| Random Forest | Bagging-based ensemble learning | Combines multiple decision trees |
-| LightGBM | Gradient boosting | Sequentially improves tree-based predictions |
-| Multi-Layer Perceptron (MLP) | Artificial neural network | Learns nonlinear relationships through hidden layers |
-
-### 5.1 Logistic Regression
-
-Logistic Regression is a linear classification algorithm that estimates the probability of an observation belonging to a particular class.
-
-It uses a sigmoid function to transform a weighted combination of input features into a probability between zero and one.
-
-### 5.2 Gaussian Naive Bayes
-
-Gaussian Naive Bayes is a probabilistic classification algorithm based on Bayes' theorem.
-
-It assumes that features are conditionally independent given the class and that continuous features follow Gaussian distributions.
-
-### 5.3 Random Forest
-
-Random Forest is an ensemble learning algorithm that combines predictions from multiple decision trees.
-
-It uses bootstrap sampling and random feature selection to build diverse trees and aggregates their predictions through majority voting.
-
-### 5.4 LightGBM
-
-LightGBM is a gradient boosting framework based on decision trees.
-
-It builds trees sequentially, with each successive tree contributing to the correction of errors made by the existing ensemble. It uses histogram-based learning and leaf-wise tree growth for computational efficiency.
-
-### 5.5 Multi-Layer Perceptron
-
-A Multi-Layer Perceptron is a feedforward artificial neural network consisting of input, hidden and output layers.
-
-It learns relationships between input features through forward propagation and updates its weights using backpropagation and an optimization algorithm.
-
-## 6. Model Configurations
-
-The following configurations were used in the current experimental run.
-
-| Model | Configuration |
-|---|---|
-| Logistic Regression | `max_iter=1000`, `class_weight='balanced'` |
-| Gaussian Naive Bayes | GaussianNB with median imputation and standard scaling |
-| Random Forest | `n_estimators=300`, `min_samples_split=4`, `min_samples_leaf=2`, `class_weight='balanced'` |
-| LightGBM | `n_estimators=300`, `learning_rate=0.05`, `num_leaves=31`, `class_weight='balanced'` |
-| MLP | `hidden_layer_sizes=(64,32)`, `activation='relu'`, `solver='adam'`, `learning_rate_init=0.001`, `max_iter=300`, `early_stopping=True` |
-
-Median imputation and standard scaling are applied through the model pipelines where configured.
-
-## 7. Experimental Results
-
-The following results were obtained from the current model-training run.
-
-### 7.1 Classification Performance
-
-| Model | Accuracy | Precision | Recall | Binary F1 | Macro F1 |
-|---|---:|---:|---:|---:|---:|
-| Logistic Regression | 0.7839 | 0.1776 | 0.9088 | 0.2971 | 0.5847 |
-| Gaussian Naive Bayes | 0.9480 | 0.4399 | 0.1258 | 0.1957 | 0.5844 |
-| Random Forest | **0.9716** | 0.7290 | 0.6908 | **0.7094** | **0.8472** |
-| MLP | 0.9707 | **0.7421** | 0.6403 | 0.6875 | 0.8361 |
-| LightGBM | 0.9479 | 0.4899 | **0.8803** | 0.6295 | 0.8008 |
-
-### 7.2 Training and Inference Time
-
-| Model | Training Time (seconds) | Inference Time (seconds) |
-|---|---:|---:|
-| Logistic Regression | 8.60 | 0.45 |
-| Gaussian Naive Bayes | 6.23 | 1.03 |
-| Random Forest | 849.59 | 19.25 |
-| MLP | 1719.57 | 10.89 |
-| LightGBM | 31.67 | 11.19 |
-
-### 7.3 Additional Evaluation Metrics
-
-| Model | Log Loss | Observation Top-1 Accuracy |
-|---|---:|---:|
-| Logistic Regression | 0.4066 | 0.5164 |
-| Gaussian Naive Bayes | 0.1793 | 0.6115 |
-| Random Forest | 0.0989 | **0.7303** |
-| MLP | **0.0843** | 0.7214 |
-| LightGBM | 0.1362 | 0.7261 |
-
-### 7.4 Confusion Matrices
-
-The confusion matrices below use the order:
-
-`[[True Negative, False Positive], [False Negative, True Positive]]`
-
-**Logistic Regression**
-
-```text
-[[785406, 225056],
- [  4875,  48586]]
-```
-
-**Gaussian Naive Bayes**
-
-```text
-[[1001899, 8563],
- [  46735, 6726]]
-```
-
-**Random Forest**
-
-```text
-[[996734, 13728],
- [ 16529, 36932]]
-```
-
-**MLP**
-
-```text
-[[998568, 11894],
- [ 19230, 34231]]
-```
-
-**LightGBM**
-
-```text
-[[961464, 48998],
- [  6397, 47064]]
-```
-
-### 7.5 Result Analysis
-
-The experimental results indicate differences in the performance and computational requirements of the five models.
-
-- **Random Forest** achieved the highest Macro F1 score of 0.8472 and observation-level Top-1 accuracy of 73.03%, providing the strongest overall classification performance in the current experiment.
-- **MLP** achieved the highest precision of 74.21% and the lowest log loss of 0.0843, but required the longest training time.
-- **LightGBM** achieved the highest recall of 88.03% while maintaining a relatively short training time of approximately 31.67 seconds.
-- **Logistic Regression** achieved high recall but comparatively low precision, indicating a larger number of false-positive predictions.
-- **Gaussian Naive Bayes** achieved high overall accuracy but low recall, demonstrating the limitations of relying on accuracy alone for imbalanced classification.
-
-Random Forest currently provides the strongest overall classification performance, while LightGBM offers a promising balance between computational efficiency and predictive performance.
-
-These results represent the current experimental run and require validation across trips and against independently verified route-level outcomes.
-
-## 8. Evaluation Metrics
-
-The following metrics are used to assess model performance.
-
-| Metric | Purpose |
-|---|---|
-| Accuracy | Measures the proportion of correctly classified candidate rows |
-| Precision | Measures the proportion of predicted positive candidates that are correct |
-| Recall | Measures the proportion of actual positive candidates identified |
-| Binary F1-score | Harmonic mean of precision and recall for the positive class |
-| Macro F1-score | Computes F1 independently for each class and averages the results |
-| Confusion Matrix | Summarizes correct and incorrect class predictions |
-| Log Loss | Measures the quality of predicted class probabilities |
-| Observation Top-1 Accuracy | Measures whether the highest-ranked candidate matches the derived positive label |
-| Training Time | Measures the time required to train a model |
-| Inference Time | Measures the time required to generate predictions |
-
-Macro F1 is particularly useful because it gives equal importance to both classes, helping account for class imbalance.
-
-Observation-level Top-1 accuracy evaluates candidate ranking separately for each GPS observation. It is distinct from binary classification accuracy, which evaluates each candidate independently.
-
-## 9. Project Structure
-
-The repository is organized into source code, processed datasets and generated outputs.
-
-```text
-Team11_PathSnap/
-│
-├── data/
-│   └── processed/
-│       ├── dataset summary CSV files
-│       ├── timestamp analysis CSV files
-│       ├── graph statistics CSV files
-│       ├── trip_*_candidates.csv
-│       ├── trip_*_features.csv
-│       ├── trip_*_monotonic_alignment.csv
-│       └── other processed CSV files
-│
-├── outputs/
-│   │
-│   ├── feature_selection/
-│   │   └── Feature selection reports and visualizations
-│   │
-│   ├── model_results/
-│   │   └── Model evaluation results and generated outputs
-│   │
-│   └── trip_00000001.html
-│       └── Interactive Folium trajectory visualization
-│
-├── src/
-│   ├── batch_alignment.py
-│   ├── batch_feature_extraction.py
-│   ├── candidate_generation.py
-│   ├── data_processing.py
-│   ├── feature_extraction.py
-│   ├── feature_selection.py
-│   ├── ground_truth_alignment.py
-│   ├── inspect_midpoint_ranks.py
-│   ├── inspect_missing_candidates.py
-│   ├── monotonic_alignment.py
-│   ├── train_models.py
-│   ├── validate_alignment.py
-│   └── validate_candidates.py
-│
-├── .gitignore
-└── README.md
-```
-
-### 9.1 Source Code Description
-
-| File | Responsibility |
-|---|---|
-| `data_processing.py` | Loads, validates and analyses GPS and road-network data |
-| `candidate_generation.py` | Generates nearby road-segment candidates using spatial indexing |
-| `batch_feature_extraction.py` | Performs candidate generation and feature extraction across multiple trips |
-| `feature_extraction.py` | Extracts spatial and movement-related features |
-| `feature_selection.py` | Performs statistical feature analysis and selection |
-| `ground_truth_alignment.py` | Implements ground-truth route alignment functionality |
-| `monotonic_alignment.py` | Performs monotonic GPS-to-route alignment |
-| `batch_alignment.py` | Generates alignment outputs across multiple trips |
-| `train_models.py` | Trains and evaluates the five machine learning models |
-| `validate_candidates.py` | Validates candidate-generation results |
-| `validate_alignment.py` | Validates route-alignment results |
-| `inspect_midpoint_ranks.py` | Investigates candidate ranking and midpoint-based retrieval |
-| `inspect_missing_candidates.py` | Investigates missing candidate road segments |
-| `src/hmm/emission_probabilities.py` | Scores road candidates and normalizes per-observation RF emissions |
-| `src/hmm/transition_probabilities.py` | Builds road-network transition scores and matrices |
-| `src/hmm/viterbi.py` | Reconstructs one road-arc sequence per GPS trip |
-| `src/hmm/evaluate_viterbi.py` | Compares Viterbi and classifier-only predictions |
-| `src/hmm/run_pipeline.py` | Runs and summarizes a bounded HMM pilot batch |
-
-### 9.2 Directory Description
-
-**`data/processed/`**
-
-Contains intermediate and processed CSV files generated during the preprocessing pipeline, including:
-
-- Dataset and trip summaries.
-- Timestamp analysis.
-- Road-network statistics.
-- Candidate generation results.
-- Extracted feature data.
-- Route alignment outputs.
-
-**`outputs/feature_selection/`**
-
-Stores feature-selection results, statistical analysis, correlation visualizations and generated reports.
-
-**`outputs/model_results/`**
-
-Stores machine learning model evaluation results, performance comparisons, confusion matrices and other generated model outputs.
-
-**`outputs/`**
-
-Contains generated visualizations, including interactive Folium maps of GPS trajectories.
-
-### 9.3 HMM Route Reconstruction
-
-The HMM pipeline turns Random Forest candidate probabilities into per-observation
-emissions, builds road-network transition probabilities, and uses Viterbi
-decoding to select one road arc per GPS observation. The evaluation compares
-those predictions with Random Forest Top-1 and reports per-trip and pooled
-arc-level metrics, selected-transition reachability, GPS-to-road distance,
-runtime and output size.
-
-Run the staged pilot from the repository root:
-
-```powershell
-python -m src.hmm.run_pipeline
-```
-
-By default, this processes only Trips 5, 13 and 16. A different explicit
-subset can be supplied with `--trip-ids`, for example
-`python -m src.hmm.run_pipeline --trip-ids 5 13 16`. It does not start the
-remaining validation trips.
-Outputs are written under `outputs/hmm_results/`, with per-trip evaluation
-files and a `pilot_batch_summary.csv` under `outputs/hmm_results/evaluation/`.
-
-The designated ten-trip student-test partition can be evaluated separately
-with the already-trained model:
-
-```powershell
-python -m src.hmm.run_pipeline --partition student_test
-```
-
-This prepares that partition's candidate features and route alignments from
-`Student folder/student_test/` and writes its aggregate summary to
-`outputs/hmm_results/evaluation/student_test_hmm_summary.csv`. It does not
-retrain the classifier or access the evaluator-testing partition.
-
-The monotonic-alignment arc labels used for evaluation are provisional,
-route-derived references rather than independently verified ground truth.
-Results should be described with this limitation; the student-test partition
-should be used only as specified by project guidelines, and the
-evaluator-testing partition must not be used for parameter selection.
-
-## 10. Installation and Execution
-
-### 10.1 Clone the Repository
-
-```bash
-git clone <repository-url>
-cd Team11_PathSnap
-```
-
-### 10.2 Create a Virtual Environment
-
-```bash
-python -m venv .venv
-```
-
-Activate the environment on Windows:
-
-```powershell
-.venv\Scripts\activate
-```
-
-### 10.3 Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-The project uses the following primary Python libraries:
-
-```text
-numpy
-pandas
-scikit-learn
-scipy
-matplotlib
-networkx
-folium
-lightgbm
-```
-
-### 10.4 Execute the Pipeline
-
-Ensure that the raw dataset is available at the configured data path.
-
-The main processing workflow can be executed in the following order:
-
-**Step 1: Data preprocessing**
-
-```bash
-python src/data_processing.py
-```
-
-**Step 2: Batch candidate generation and feature extraction**
-
-```bash
-python src/batch_feature_extraction.py
-```
-
-**Step 3: Feature selection**
-
-```bash
-python src/feature_selection.py
-```
-
-**Step 4: Batch route alignment**
-
-```bash
-python src/batch_alignment.py
-```
-
-**Step 5: Model training and evaluation**
-
-```bash
-python src/train_models.py
-```
-
-Candidate generation, feature extraction and alignment can also be executed individually when required.
-
-Validation and diagnostic scripts can be run separately to inspect candidate coverage, alignment quality and intermediate processing results.
-
-Run the staged HMM pilot after the Random Forest model and trip-level
-alignment/feature files are available:
-
-```powershell
-python -m src.hmm.run_pipeline
-```
-
-To run the separate ten-trip student-test evaluation, use:
-
-```powershell
-python -m src.hmm.run_pipeline --partition student_test
-```
-
-## 11. Future Improvements
-
-Potential directions for further development include:
-
-- Improving candidate-generation coverage and spatial-search efficiency.
-- Performing trip-level cross-validation.
-- Investigating feature importance and hyperparameter optimization.
-- Improving HMM transition modelling and sequence-level route continuity.
-- Evaluating reconstruction quality on independently held-out trips.
-- Exploring cloud-based execution using Modal.
-- Comparing observation-level predictions with complete reconstructed routes.
-
-## 12. Conclusion
-
-PathSnap investigates machine learning-based map matching through a structured pipeline involving GPS preprocessing, spatial candidate generation, feature engineering, feature selection and comparative model evaluation.
-
-The current experiments demonstrate promising candidate-classification performance from ensemble learning approaches, particularly Random Forest and LightGBM.
-
-The project establishes a foundation for further investigation into sequence-aware map matching and geographically consistent GPS trajectory reconstruction.
-
----
-
-**Project:** PathSnap  
-**Team:** 11
